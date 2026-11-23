@@ -37,17 +37,19 @@ class AngelOneAdapter(BrokerAdapter):
         self._feed_token: str | None = None
 
     @staticmethod
-    def _generate_totp(secret: str) -> str:
+    def _generate_totp(secret: str, time_offset_seconds: int = 0) -> str:
         normalized = secret.strip().upper().replace(" ", "")
         padding = "=" * ((8 - len(normalized) % 8) % 8)
         key = base64.b32decode(normalized + padding)
-        counter = int(time.time()) // 30
+        counter = int(time.time() + time_offset_seconds) // 30
         digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
         offset = digest[-1] & 0x0F
         binary = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
         return f"{binary % 1_000_000:06d}"
 
-    def login(self) -> dict[str, Any]:
+    def login(self, totp_time_offset_seconds: int | None = None) -> dict[str, Any]:
+        if totp_time_offset_seconds is None:
+            totp_time_offset_seconds = int(os.getenv("ANGEL_TOTP_TIME_OFFSET_SECONDS", "-30"))
         api_key = os.getenv("ANGEL_API_KEY", self.config.api_key)
         client_id = os.getenv("ANGEL_CLIENT_ID", "")
         pin = os.getenv("ANGEL_PIN", self.config.api_secret)
@@ -67,7 +69,7 @@ class AngelOneAdapter(BrokerAdapter):
         payload = json.dumps({
             "clientcode": client_id,
             "password": pin,
-            "totp": self._generate_totp(totp_secret),
+            "totp": self._generate_totp(totp_secret, totp_time_offset_seconds),
         }).encode("utf-8")
         request = Request(
             f"{self.config.base_url}/rest/auth/angelbroking/user/v1/loginByPassword",
