@@ -3,7 +3,7 @@ config_version: "1.0"
 broker:
   provider: "angel"
   api_key_env: "ANGEL_API_KEY"
-  api_secret_env: "ANGEL_API_SECRET"
+  api_secret_env: "ANGEL_PIN"
   base_url: "https://apiconnect.angelone.in"
   websocket_url: "wss://smartapisocket.angelone.in/websocket/v1"
   rate_limit_per_second: 3

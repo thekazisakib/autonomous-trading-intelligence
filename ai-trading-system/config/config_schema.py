@@ -10,7 +10,7 @@ class BrokerConfig(BaseModel):
 
     provider: Literal["angel"] = "angel"
     api_key_env: str = "ANGEL_API_KEY"
-    api_secret_env: str = "ANGEL_API_SECRET"
+    api_secret_env: str = "ANGEL_PIN"
     base_url: str = "https://apiconnect.angelone.in"
     websocket_url: str = "wss://smartapisocket.angelone.in/websocket/v1"
     rate_limit_per_second: int = 3

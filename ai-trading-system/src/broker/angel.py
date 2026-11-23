@@ -1,6 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import os
+import struct
+import time
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List
@@ -25,9 +33,75 @@ class AngelOneAdapter(BrokerAdapter):
         self._reconnect_delay = 1.0
         self._max_reconnect_delay = 60.0
         self._subscribed_symbols: set[str] = set()
+        self._jwt_token: str | None = None
+        self._feed_token: str | None = None
+
+    @staticmethod
+    def _generate_totp(secret: str) -> str:
+        normalized = secret.strip().upper().replace(" ", "")
+        padding = "=" * ((8 - len(normalized) % 8) % 8)
+        key = base64.b32decode(normalized + padding)
+        counter = int(time.time()) // 30
+        digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+        offset = digest[-1] & 0x0F
+        binary = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+        return f"{binary % 1_000_000:06d}"
+
+    def login(self) -> dict[str, Any]:
+        api_key = os.getenv("ANGEL_API_KEY", self.config.api_key)
+        client_id = os.getenv("ANGEL_CLIENT_ID", "")
+        pin = os.getenv("ANGEL_PIN", self.config.api_secret)
+        totp_secret = os.getenv("ANGEL_TOTP_SECRET", "")
+
+        missing = [
+            name for name, value in (
+                ("ANGEL_API_KEY", api_key),
+                ("ANGEL_CLIENT_ID", client_id),
+                ("ANGEL_PIN", pin),
+                ("ANGEL_TOTP_SECRET", totp_secret),
+            ) if not value
+        ]
+        if missing:
+            raise RuntimeError(f"Missing Angel One credentials: {', '.join(missing)}")
+
+        payload = json.dumps({
+            "clientcode": client_id,
+            "password": pin,
+            "totp": self._generate_totp(totp_secret),
+        }).encode("utf-8")
+        request = Request(
+            f"{self.config.base_url}/rest/auth/angelbroking/user/v1/loginByPassword",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-ClientLocalIP": "127.0.0.1",
+                "X-ClientPublicIP": "127.0.0.1",
+                "X-MACAddress": "00:00:00:00:00:00",
+                "X-PrivateKey": api_key,
+                "X-SourceID": "WEB",
+            },
+            method="POST",
+        )
+
+        try:
+            with urlopen(request, timeout=20) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Angel One login failed HTTP {exc.code}: {body}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Angel One login network error: {exc.reason}") from exc
+
+        if not result.get("status") or not result.get("data"):
+            raise RuntimeError(f"Angel One login rejected: {result}")
+
+        self._jwt_token = result["data"].get("jwtToken")
+        self._feed_token = result["data"].get("feedToken")
+        return result["data"]
 
     async def connect(self) -> None:
-        """Connect to Angel One WebSocket."""
+        """Authenticate and connect to Angel One WebSocket."""
         try:
             import websockets  # type: ignore
 
