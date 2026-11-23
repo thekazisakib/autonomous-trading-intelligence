@@ -8,11 +8,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class BrokerConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    provider: Literal["upstox", "angel", "dhan", "fyers", "zerodha"] = "upstox"
-    api_key_env: str = "UPSTOX_API_KEY"
-    api_secret_env: str = "UPSTOX_API_SECRET"
-    base_url: str = "https://api.upstox.com/v2"
-    websocket_url: str = "wss://api.upstox.com/v2/feed"
+    provider: Literal["angel"] = "angel"
+    api_key_env: str = "ANGEL_API_KEY"
+    api_secret_env: str = "ANGEL_API_SECRET"
+    base_url: str = "https://apiconnect.angelone.in"
+    websocket_url: str = "wss://smartapisocket.angelone.in/websocket/v1"
     rate_limit_per_second: int = 3
     daily_api_call_limit: int = 1000
 
@@ -87,21 +87,40 @@ class ResearchConfig(BaseModel):
 class ForecastConfig(BaseModel):
     """Forecasting configuration - optional ML models for thesis generation."""
     model_config = ConfigDict(frozen=True)
-    
-    enabled: bool = False
-    model_type: str = "xgboost"  # "xgboost" | "prophet" | "none"
+
+    enabled: bool = True
+    model_type: str = "xgboost"
     model_path: str = "models/forecast_xgb.pkl"
     retrain: bool = False
     feature_names: List[str] = Field(
         default_factory=lambda: ["rsi_14", "volume_surge_pct", "thesis_score", "ltp"]
     )
 
+
+class AgenticConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = True
+    llm_provider: str = "local"
+    model_name: str = "microsoft/phi-3-mini-4k-instruct"
+    model_path: str = "models/phi-3-mini"
+    max_tokens: int = Field(default=512, gt=0)
+    temperature: float = Field(default=0.3, ge=0.0, le=1.0)
+    thesis_weight: float = Field(default=0.2, ge=0.0, le=1.0)
+
+
+class QualityGateConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     enabled: bool = True
     max_staleness_seconds: int = Field(default=30, gt=0)
     check_circuit_filters: bool = True
     check_price_sanity: bool = True
     check_volume_surge: bool = True
-    circuit_buffer_pct: float = Field(default=0.5, ge=0.0, le=5.0)  # Buffer before circuit limit
+    circuit_buffer_pct: float = Field(default=0.5, ge=0.0, le=5.0)
+
+
+class ObservabilityConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     log_level: str = "INFO"

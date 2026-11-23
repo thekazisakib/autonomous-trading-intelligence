@@ -187,21 +187,21 @@ def test_broker_adapter_cannot_instantiate():
         pass  # Expected
 
 
-def test_registry_returns_upstox():
+def test_registry_returns_angel():
     from broker.base import BrokerConfig
     from broker.registry import get_adapter
-    from broker.upstox import UpstoxAdapter
+    from broker.angel import AngelOneAdapter
 
     config = BrokerConfig(
-        provider="upstox",
+        provider="angel",
         api_key="key",
         api_secret="secret",
-        base_url="https://api.upstox.com/v2",
-        websocket_url="wss://api.upstox.com/v2/feed",
+        base_url="https://apiconnect.angelone.in",
+        websocket_url="wss://smartapisocket.angelone.in/websocket/v1",
     )
-    adapter = get_adapter("upstox", config)
-    assert isinstance(adapter, UpstoxAdapter)
-    assert adapter.config.provider == "upstox"
+    adapter = get_adapter("angel", config)
+    assert isinstance(adapter, AngelOneAdapter)
+    assert adapter.config.provider == "angel"
 
 
 def test_registry_raises_on_unknown():
@@ -222,22 +222,22 @@ def test_registry_raises_on_unknown():
         pass  # Expected
 
 
-def test_upstox_parse_tick():
-    from broker.upstox import UpstoxAdapter
+def test_angel_parse_tick():
+    from broker.angel import AngelOneAdapter
     from broker.base import BrokerConfig
 
     config = BrokerConfig(
-        provider="upstox",
+        provider="angel",
         api_key="key",
         api_secret="secret",
-        base_url="https://api.upstox.com/v2",
-        websocket_url="wss://api.upstox.com/v2/feed",
+        base_url="https://apiconnect.angelone.in",
+        websocket_url="wss://smartapisocket.angelone.in/websocket/v1",
     )
-    adapter = UpstoxAdapter(config)
+    adapter = AngelOneAdapter(config)
 
     raw = {
-        "instrument_key": "RELIANCE",
-        "last_price": "2500.50",
+        "tradingSymbol": "RELIANCE",
+        "lastTradedPrice": "2500.50",
         "bid": "2500.00",
         "ask": "2501.00",
         "volume": "15000",
@@ -252,23 +252,23 @@ def test_upstox_parse_tick():
     assert tick.volume == 15000
 
 
-def test_upstox_parse_tick_invalid():
-    from broker.upstox import UpstoxAdapter
+def test_angel_parse_tick_invalid():
+    from broker.angel import AngelOneAdapter
     from broker.base import BrokerConfig
 
     config = BrokerConfig(
-        provider="upstox",
+        provider="angel",
         api_key="key",
         api_secret="secret",
-        base_url="https://api.upstox.com/v2",
-        websocket_url="wss://api.upstox.com/v2/feed",
+        base_url="https://apiconnect.angelone.in",
+        websocket_url="wss://smartapisocket.angelone.in/websocket/v1",
     )
-    adapter = UpstoxAdapter(config)
+    adapter = AngelOneAdapter(config)
 
     # Test valid tick parsing
     raw = {
-        "instrument_key": "RELIANCE",
-        "last_price": "2500.50",
+        "tradingSymbol": "RELIANCE",
+        "lastTradedPrice": "2500.50",
         "bid": "2500.00",
         "ask": "2501.00",
         "volume": "15000",

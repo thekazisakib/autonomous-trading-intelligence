@@ -9,20 +9,19 @@
 
 LangGraph and MCP never block the trading loop.
 
-## Broker: Upstox (Free API)
+## Broker: Angel One SmartAPI
 
-This project uses **Upstox** as the default broker — no monthly subscription fee, WebSocket for realtime NSE data, and REST API for order placement.
+This project uses **Angel One** for realtime market data and trading operations.
 
-### Setup Upstox API
+### Setup Angel One API
 
-1. Create a developer account at [https://developer.upstox.com/](https://developer.upstox.com/)
-2. Create an app and get your `API_KEY` and `API_SECRET`
-3. Add them to `.env`:
+1. Create an app in the Angel One SmartAPI developer portal.
+2. Add the API credentials to `.env`:
    ```
-   UPSTOX_API_KEY=your_key
-   UPSTOX_API_SECRET=your_secret
+   ANGEL_API_KEY=your_api_key
+   ANGEL_API_SECRET=your_api_secret
    ```
-4. Update `config/config.yaml` if needed (broker.provider is already `upstox`)
+3. `config/config.yaml` selects Angel One by default.
 
 ## Setup
 
@@ -100,7 +99,7 @@ docker-compose up --build
 | Milestone | Focus | Status |
 |-----------|-------|--------|
 | 1 | Config, store, deterministic entry/exit, risk, orchestrator, Docker, CI/CD | ✅ Done |
-| 2 | Broker WebSocket adapter (Upstox) + realtime tick ingestion | ✅ Done |
+| 2 | Broker WebSocket adapter (Angel One) + realtime tick ingestion | ✅ Done |
 | 3 | Data quality gate (stale, circuit, split adjustment) | Planned |
 | 4 | Execution engine live broker integration | Planned |
 | 5 | Human approval gate (Telegram) | Planned |

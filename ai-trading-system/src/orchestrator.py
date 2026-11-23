@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import time
 from dataclasses import dataclass
@@ -71,8 +72,8 @@ class TradingOrchestrator:
         if not config.trading.paper_trading:
             broker_config = BrokerConfig(
                 provider=config.broker.provider,
-                api_key="",
-                api_secret="",
+                api_key=os.getenv(config.broker.api_key_env, ""),
+                api_secret=os.getenv(config.broker.api_secret_env, ""),
                 base_url=config.broker.base_url,
                 websocket_url=config.broker.websocket_url,
                 rate_limit_per_second=config.broker.rate_limit_per_second,

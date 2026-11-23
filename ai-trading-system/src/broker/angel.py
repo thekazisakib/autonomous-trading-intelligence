@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List
@@ -128,10 +129,9 @@ class AngelOneAdapter(BrokerAdapter):
                 bid=float(data.get("bid", 0)) if data.get("bid") else None,
                 ask=float(data.get("ask", 0)) if data.get("ask") else None,
                 volume=int(data.get("volume", 0)),
-                data_freshness_seconds=0.0,
             )
         except Exception:
-            logger.exception("tick_parse_failed", raw=data)
+            logger.exception("tick_parse_failed raw=%s", data)
             return None
 
     async def place_order(

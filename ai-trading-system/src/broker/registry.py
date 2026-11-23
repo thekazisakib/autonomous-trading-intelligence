@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 from broker.base import BrokerAdapter, BrokerConfig
-from broker.upstox import UpstoxAdapter
 from broker.angel import AngelOneAdapter
 
 _PROVIDER_REGISTRY: dict[str, type[BrokerAdapter]] = {
-    "upstox": UpstoxAdapter,
     "angel": AngelOneAdapter,
-    # "dhan": DhanAdapter,
-    # "fyers": FyersAdapter,
-    # "zerodha": ZerodhaAdapter,
 }
 
 

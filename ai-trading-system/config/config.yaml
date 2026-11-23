@@ -1,11 +1,11 @@
 config_version: "1.0"
 
 broker:
-  provider: "upstox"
-  api_key_env: "UPSTOX_API_KEY"
-  api_secret_env: "UPSTOX_API_SECRET"
-  base_url: "https://api.upstox.com/v2"
-  websocket_url: "wss://api.upstox.com/v2/feed"
+  provider: "angel"
+  api_key_env: "ANGEL_API_KEY"
+  api_secret_env: "ANGEL_API_SECRET"
+  base_url: "https://apiconnect.angelone.in"
+  websocket_url: "wss://smartapisocket.angelone.in/websocket/v1"
   rate_limit_per_second: 3
   daily_api_call_limit: 1000
 
