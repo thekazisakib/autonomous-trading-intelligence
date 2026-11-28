@@ -1,0 +1,112 @@
+name: CI/CD Pipeline
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  PYTHON_VERSION: "3.11"
+  POETRY_VERSION: "1.8.0"
+
+jobs:
+  lint-and-type-check:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Ruff linting
+        run: ruff check src/ config/ tests/
+
+      - name: Run Ruff format check
+        run: ruff format --check src/ config/ tests/
+
+      - name: Run MyPy type checking
+        run: mypy src/ config/
+
+  test:
+    name: Unit Tests
+    needs: lint-and-type-check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run unit tests with coverage
+        run: pytest --cov=src --cov=config --cov-report=term-missing --cov-fail-under=80
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Safety check for vulnerable dependencies
+        run: |
+          pip install safety
+          safety check --ignore 38702 || true
+
+      - name: Check for secrets in code
+        uses: trufflesecurity/trufflehog@v3
+        with:
+          base-commit: HEAD~1
+          only-verified: false
+
+  build-docker:
+    name: Build Docker Image
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: ai-trading-system:latest
+          load: true
+
+      - name: Run containerized tests
+        run: docker run --rm ai-trading-system:latest pytest --cov=src --cov=config --cov-fail-under=80
