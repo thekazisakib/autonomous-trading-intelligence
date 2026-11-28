@@ -9,6 +9,7 @@ from data.store import FeatureSnapshot, MarketCandle, MarketTick, Store
 from forecasting.baseline import RollingTrendForecaster
 from forecasting.opportunities import (
     compare_matured_forecasts,
+    generate_walk_forward_forecasts,
     rank_universe_opportunities,
     summarize_forecast_comparisons,
 )
@@ -122,6 +123,19 @@ def test_universe_ranking_fails_closed_for_stale_quote_or_unprofitable_edge() ->
     assert stale_ranking.selected_symbol is None
     assert expensive_ranking.complete
     assert expensive_ranking.selected_symbol is None
+
+    partial_ranking = rank_universe_opportunities(
+        *args,
+        live_ticks={
+            "FAST": MarketTick("FAST", now, 103.8),
+            "SLOW": MarketTick("SLOW", now - timedelta(seconds=60), 103.8),
+        },
+        minimum_data_coverage_pct=50,
+        **kwargs,
+    )
+    assert not partial_ranking.complete
+    assert partial_ranking.coverage_pct == 50
+    assert partial_ranking.selected_symbol == "FAST"
     store.close()
 
 
@@ -180,6 +194,46 @@ def test_forecast_comparison_uses_realized_target_bar() -> None:
     assert metrics.mean_absolute_error_pct == pytest.approx(0)
 
 
+def test_walk_forward_forecasts_only_use_history_available_at_each_origin() -> None:
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    candles = [
+        MarketCandle(
+            "RELIANCE",
+            start + timedelta(minutes=5 * index),
+            100 + index,
+            100 + index,
+            100 + index,
+            100 + index,
+            100,
+        )
+        for index in range(24)
+    ]
+    forecaster = RollingTrendForecaster(lookback_bars=20, horizon_bars=3)
+    forecasts = generate_walk_forward_forecasts(candles, forecaster)
+    changed_future = [
+        *candles[:20],
+        *[
+            MarketCandle(
+                candle.symbol,
+                candle.timestamp,
+                candle.open * 2,
+                candle.high * 2,
+                candle.low * 2,
+                candle.close * 2,
+                candle.volume,
+            )
+            for candle in candles[20:]
+        ],
+    ]
+    changed_forecasts = generate_walk_forward_forecasts(changed_future, forecaster)
+    comparisons = compare_matured_forecasts(candles, forecasts)
+
+    assert len(forecasts) == 5
+    assert forecasts[0]["timestamp"] == candles[19].timestamp.isoformat()
+    assert changed_forecasts[0] == forecasts[0]
+    assert len(comparisons) == 2
+
+
 def test_store_returns_only_candles_and_forecasts_in_requested_time_range() -> None:
     store = Store(":memory:")
     start = datetime(2025, 1, 1, tzinfo=UTC)
@@ -189,8 +243,7 @@ def test_store_returns_only_candles_and_forecasts_in_requested_time_range() -> N
     outside = MarketCandle(
         "RELIANCE", start + timedelta(minutes=15), 103, 104, 102, 103, 100
     )
-    store.upsert_candle(inside)
-    store.upsert_candle(outside)
+    store.upsert_candles([inside, outside])
     store.record_shadow_forecast(
         "RELIANCE", inside.timestamp, 3, "UP", 0.5, 0.7, "test-model"
     )

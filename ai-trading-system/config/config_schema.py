@@ -42,9 +42,11 @@ class RiskConfig(BaseModel):
 class TradingConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    universe_source: Literal["configured", "nifty500"] = "configured"
     universe: list[str] = Field(
         default_factory=lambda: ["RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK"]
     )
+    minimum_universe_coverage_pct: float = Field(default=100.0, ge=0.0, le=100.0)
     exchange: Literal["NSE", "BSE"] = "NSE"
     product_type: Literal["MIS", "CNC"] = "MIS"
     order_type: Literal["LIMIT", "MARKET"] = "LIMIT"

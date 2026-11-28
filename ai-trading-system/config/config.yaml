@@ -27,7 +27,9 @@ risk:
   allowed_end_time: "15:15"
 
 trading:
+  universe_source: "nifty500"
   universe: ["RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK"]
+  minimum_universe_coverage_pct: 80.0
   exchange: "NSE"
   product_type: "MIS"
   order_type: "LIMIT"
@@ -35,7 +37,7 @@ trading:
   market_data_enabled: true
   analysis_interval_minutes: 5
   paper_trading: true
-  auto_execute: false
+  auto_execute: true
   paper_starting_capital_inr: 500000
   paper_slippage_bps: 5
   paper_cost_bps: 20
@@ -88,7 +90,7 @@ observability:
   alert_chat_id_env: "TELEGRAM_CHAT_ID"
 
 telegram_control:
-  enabled: true
+  enabled: false
   bot_token_env: "TELEGRAM_BOT_TOKEN"
   chat_id_env: "TELEGRAM_CHAT_ID"
   allowed_user_id_env: "TELEGRAM_ALLOWED_USER_ID"

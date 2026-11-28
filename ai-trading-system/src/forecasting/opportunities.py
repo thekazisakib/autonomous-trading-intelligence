@@ -42,6 +42,7 @@ class OpportunityRanking:
     complete: bool
     selected_symbol: str | None
     blocked_reason: str | None
+    coverage_pct: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ def rank_universe_opportunities(
     interval_minutes: int,
     round_trip_cost_bps: float,
     minimum_forecast_confidence: float,
+    minimum_data_coverage_pct: float = 100.0,
     live_ticks: Mapping[str, MarketTick] | None = None,
     live_features: Mapping[str, FeatureSnapshot] | None = None,
     max_tick_age_seconds: float = 30.0,
@@ -84,6 +86,8 @@ def rank_universe_opportunities(
         raise ValueError("Interval must be positive and trading costs cannot be negative")
     if not 0 <= minimum_forecast_confidence <= 1:
         raise ValueError("Minimum forecast confidence must be between zero and one")
+    if not 0 <= minimum_data_coverage_pct <= 100:
+        raise ValueError("Minimum data coverage must be between zero and one hundred")
 
     rows: list[StockOpportunity] = []
     round_trip_cost_pct = round_trip_cost_bps / 100.0
@@ -245,11 +249,12 @@ def rank_universe_opportunities(
         if row.data_ready and row.as_of is not None
     ]
     bars_aligned = (
-        len(forecast_times) == len(rows)
+        bool(forecast_times)
         and (max(forecast_times) - min(forecast_times)).total_seconds()
         <= interval_minutes * 60
     )
     complete = all(row.data_ready for row in rows) and bars_aligned
+    coverage_pct = sum(row.data_ready for row in rows) / len(rows) * 100
     ranked_market = sorted(
         (row for row in rows if row.data_ready and row.score is not None),
         key=lambda row: row.score if row.score is not None else float("-inf"),
@@ -262,8 +267,11 @@ def rank_universe_opportunities(
         reverse=True,
     )
     entry_ranks = {row.symbol: rank for rank, row in enumerate(ranked_entries, start=1)}
+    coverage_sufficient = coverage_pct >= minimum_data_coverage_pct
     selected_symbol = (
-        ranked_entries[0].symbol if complete and ranked_entries else None
+        ranked_entries[0].symbol
+        if coverage_sufficient and bars_aligned and ranked_entries
+        else None
     )
     ranked_rows = tuple(
         replace(
@@ -275,8 +283,13 @@ def rank_universe_opportunities(
         for row in rows
     )
     blocked_reason = (
-        "Waiting for fresh quotes, sufficient history, and aligned bars for the full universe"
-        if not complete
+        (
+            f"Market-data coverage is {coverage_pct:.1f}%; "
+            f"{minimum_data_coverage_pct:.1f}% is required"
+        )
+        if not coverage_sufficient
+        else "Waiting for fresh quotes, sufficient history, and aligned completed bars"
+        if not bars_aligned
         else None
         if selected_symbol is not None
         else "No symbol currently meets the forecast, cost, confidence, and entry conditions"
@@ -293,6 +306,7 @@ def rank_universe_opportunities(
         complete=complete,
         selected_symbol=selected_symbol,
         blocked_reason=blocked_reason,
+        coverage_pct=coverage_pct,
     )
 
 
@@ -334,6 +348,23 @@ def compare_matured_forecasts(
             actual_return_pct=actual_return,
         ))
     return comparisons
+
+
+def generate_walk_forward_forecasts(
+    candles: Sequence[MarketCandle],
+    forecaster: RollingTrendForecaster,
+) -> list[dict[str, str | int | float]]:
+    forecasts: list[dict[str, str | int | float]] = []
+    for history_end in range(forecaster.lookback_bars, len(candles) + 1):
+        forecast = forecaster.predict(candles[:history_end])
+        if forecast is None:
+            continue
+        forecasts.append({
+            "timestamp": forecast.timestamp.isoformat(),
+            "horizon_bars": forecast.horizon_bars,
+            "expected_return_pct": forecast.expected_return_pct,
+        })
+    return forecasts
 
 
 def summarize_forecast_comparisons(

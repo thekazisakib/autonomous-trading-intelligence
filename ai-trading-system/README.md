@@ -23,9 +23,6 @@ The current operating mode consumes Angel One market data and places simulated p
    ANGEL_PIN=your_trading_pin
    ANGEL_TOTP_SECRET=your_totp_setup_secret
    ANGEL_TOTP_TIME_OFFSET_SECONDS=0
-   TELEGRAM_BOT_TOKEN=your_rotated_bot_token
-   TELEGRAM_CHAT_ID=your_private_chat_id
-   TELEGRAM_ALLOWED_USER_ID=your_numeric_telegram_user_id
    ```
 3. Keep `market_data_enabled: true` and `paper_trading: true` in `config/config.yaml`.
 4. If the machine clock is not synchronized, fix system time first. Only set a non-zero TOTP offset after measuring the clock difference.
@@ -40,15 +37,15 @@ $env:PYTHONPATH = "$PWD\src;$PWD"
 python -m src.main
 ```
 
-The configured 5-minute analysis requires enough completed bars to calculate RSI and a volume baseline before it can propose an entry. The app starts with entries paused. Send `/resume` to enable proposals; every entry then requires an individual Telegram approval and is declined if the approval expires, the quote is stale, price movement exceeds the configured tolerance, or risk checks fail. Exits remain automatic, including while entries are paused. `/pause` or `/stop` pauses new entries without stopping exit monitoring.
+The configured 5-minute analysis requires enough completed bars to calculate RSI and a volume baseline before it can propose an entry. The checked-in configuration scans the current NIFTY 500 constituents, keeps Telegram control disabled, and enables automatic entries/exits **in the paper simulator only**. Ranking waits for at least 80% of the universe to have sufficient history, aligned bars, and fresh quotes; missing symbols are excluded and coverage is displayed. The simulator uses whole shares, a ₹500,000 initial balance on a fresh database, and configurable estimated costs/slippage. Existing paper-account state is persisted in `data/trading.db`; changing the configured initial balance does not reset an existing account.
 
-Telegram accepts `/status`, `/forecast SYMBOL`, `/resume`, `/pause`, `/approve TICKET`, and `/reject TICKET` only from the configured numeric user ID in the configured private chat. The simulator uses whole shares, a ₹500,000 initial balance on a fresh database, and configurable estimated costs/slippage. Existing paper-account state is persisted in `data/trading.db`; changing the configured initial balance does not reset an existing account.
+The NIFTY 500 list is obtained from the official Nifty Indices CSV and cached locally for 24 hours. If the source is unavailable, a valid cache up to seven days old may be used; otherwise startup fails closed rather than silently reverting to five symbols. Initial candle history is not bulk-downloaded. The monitor needs enough market-hours data to warm up its indicators and meet the coverage threshold before it can select a paper entry.
 
-`market_data_enabled` connects to Angel One for read-only quotes. `paper_trading` must remain `true`; setting it to `false` fails closed because live order execution has not been implemented. Leave `auto_execute: false` when Telegram approval is enabled. The process must remain running for quotes and automatic exits to be monitored; a sleeping or disconnected host cannot manage open positions.
+`market_data_enabled` connects to Angel One for read-only quotes. `paper_trading` must remain `true`; setting it to `false` fails closed because live order execution has not been implemented. Telegram approvals are disabled in this configuration. Automatic paper orders still pass the ranking, freshness, and risk gates, and existing stop-loss, take-profit, RSI, and maximum-holding exits remain in effect. The process and host must stay awake and connected for quotes and exits to be monitored; a sleeping or disconnected host cannot manage positions. No algorithm can guarantee profit.
 
 ## Opportunity dashboard
 
-The paper trader ranks configured symbols on completed bars using the linear-trend forecast, its confidence, estimated round-trip costs, the existing strategy entry condition, and PPO action/confidence when an enabled PPO model is configured. A new paper entry is only proposed for the highest-ranked qualifying symbol; it is still subject to fresh quotes, risk checks, and individual Telegram approval. Ranking fails closed if any configured symbol lacks sufficient recent history/features or a fresh quote. Protective exits are unchanged.
+The paper trader ranks NIFTY 500 symbols using the linear-trend forecast, heuristic confidence, estimated round-trip costs, the existing strategy entry condition, and PPO action/confidence only when an enabled PPO model is configured. It selects the highest-ranked qualifying symbol from the fresh, aligned subset once the configured coverage threshold is met. This is a paper simulation, not a profit guarantee or investment recommendation. Protective exits are unchanged.
 
 Install the optional UI dependency and launch the dashboard from this directory:
 
@@ -57,7 +54,9 @@ pip install -e ".[dashboard]"
 streamlit run dashboard.py
 ```
 
-The dashboard refreshes its stored-bar ranking every 15 seconds and offers an actual-price chart with matured forecast targets, a forward projection, and historical forecast-comparison metrics. Start/end dates select the historical comparison window; they do not instruct the trader when to enter or exit. The target timestamp is a forecast horizon, not a promised exit time. The current forecaster is an uncalibrated baseline, so rankings are research signals rather than evidence of profitability. Keep PPO disabled until a candidate is trained and evaluated on substantial historical data.
+The dashboard refreshes the ranking every 15 seconds and the chart every five seconds. It shows actual closes, the latest persisted live quote, matured forecast targets, a forward projection, and historical comparison metrics. Live overlays require the paper market-data monitor to be running. Start/end dates select the historical comparison window; they do not instruct the trader when to enter or exit. The target timestamp is a forecast horizon, not a promised exit time. The current forecaster is an uncalibrated baseline, so rankings are research signals rather than evidence of profitability. Keep PPO disabled until a candidate is trained and evaluated on substantial historical data.
+
+When no candles are stored, select a symbol and date range (up to 30 calendar days), then use the read-only Angel One history import in the dashboard. It requires the Angel One credentials in the local `.env`, imports completed candles only, and computes walk-forward baseline forecasts using only data available at each prediction time. No order endpoint is called. The SQLite database is local and ignored by Git; Streamlit Community Cloud will not have this history unless a separate data source is configured.
 
 ## Forecasting and RL simulation
 
@@ -78,7 +77,7 @@ pip install -e ".[rl]"
 python -m src.rl.train_ppo --symbol RELIANCE --timesteps 20000
 ```
 
-PPO requires at least 300 candles and uses chronological 70/15/15 train, validation, and test slices, with estimated costs/slippage and a conservative one-share simulation. It saves `models/ppo_candidate.zip`; reported metrics are not a guarantee of future performance. PPO activation is disabled in the default config. After reviewing the held-out results, set `rl.enabled: true`, `rl.model_path: "models/ppo_candidate"`, and `rl.shadow_mode: false` to let PPO propose paper entries and exits. New entries still require Telegram approval and all proposals still pass risk checks. The existing deterministic stop-loss, take-profit, and holding-time exits remain hard overrides. PPO exploration/training does not run in the real-time loop, and no policy is automatically retrained or promoted.
+PPO requires at least 300 candles and uses chronological 70/15/15 train, validation, and test slices, with estimated costs/slippage and a conservative one-share simulation. It saves `models/ppo_candidate.zip`; reported metrics are not a guarantee of future performance. PPO activation is disabled in the default config. After reviewing the held-out results, set `rl.enabled: true`, `rl.model_path: "models/ppo_candidate"`, and `rl.shadow_mode: false` to let PPO propose paper entries and exits. New entries follow the configured paper auto-execution/approval mode and all proposals still pass risk checks. The existing deterministic stop-loss, take-profit, and holding-time exits remain hard overrides. PPO exploration/training does not run in the real-time loop, and no policy is automatically retrained or promoted.
 
 ## Gemini shadow analysis
 

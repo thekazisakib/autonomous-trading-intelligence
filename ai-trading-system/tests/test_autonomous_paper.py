@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import struct
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from unittest.mock import patch
 
+import pytest
+
 from broker.angel import AngelOneAdapter
 from broker.base import BrokerConfig, NormalizedTick
-from data.features import MarketFeatureEngine
-from data.store import FeatureSnapshot, MarketCandle, MarketTick, PositionState, Store
-from execution.engine import ExecutionEngine, OrderStatus
 from config.loader import load_config
+from data.features import MarketFeatureEngine
+from data.store import FeatureSnapshot, MarketCandle, MarketTick, Store
+from execution.engine import ExecutionEngine, OrderStatus
 from orchestrator import TradingOrchestrator
 
 
@@ -69,6 +72,62 @@ def test_angel_one_instrument_master_maps_only_nse_equities() -> None:
 
     assert by_symbol == {"RELIANCE": "2885"}
     assert by_token == {"2885": "RELIANCE"}
+
+
+def test_angel_one_historical_candles_are_sorted_and_timezone_normalized() -> None:
+    adapter = AngelOneAdapter(_broker_config())
+    adapter._jwt_token = "test-jwt"
+    response = {
+        "status": True,
+        "data": [
+            ["2025-01-01T09:20:00+05:30", 102, 103, 101, 102, 200],
+            ["2025-01-01T09:15:00+05:30", 100, 102, 99, 101, 100],
+        ],
+    }
+    start = datetime(2025, 1, 1, 9, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+    end = datetime(2025, 1, 1, 15, 30, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+
+    with (
+        patch.object(adapter, "login"),
+        patch.object(
+            adapter,
+            "_load_instrument_tokens",
+            return_value=({"RELIANCE": "2885"}, {"2885": "RELIANCE"}),
+        ),
+        patch(
+            "broker.angel.urlopen",
+            return_value=BytesIO(json.dumps(response).encode("utf-8")),
+        ) as urlopen,
+    ):
+        candles = adapter.get_historical_candles("reliance", start, end, 5)
+
+    request = urlopen.call_args.args[0]
+    assert request.full_url.endswith(
+        "/rest/secure/angelbroking/historical/v1/getCandleData"
+    )
+    assert json.loads(request.data) == {
+        "exchange": "NSE",
+        "symboltoken": "2885",
+        "interval": "FIVE_MINUTE",
+        "fromdate": "2025-01-01 09:00",
+        "todate": "2025-01-01 15:30",
+    }
+    assert [candle.close for candle in candles] == [101, 102]
+    assert candles[0].timestamp == datetime(
+        2025, 1, 1, 3, 45, tzinfo=timezone.utc
+    )
+
+
+def test_angel_one_historical_candles_reject_ranges_over_30_days() -> None:
+    adapter = AngelOneAdapter(_broker_config())
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    end = start + timedelta(days=31)
+
+    with patch.object(adapter, "login") as login:
+        with pytest.raises(ValueError, match="30 days"):
+            adapter.get_historical_candles("RELIANCE", start, end, 5)
+
+    login.assert_not_called()
 
 
 def test_five_minute_feature_engine_persists_closed_candles_and_rsi() -> None:
@@ -199,7 +258,7 @@ def test_orchestrator_autonomously_enters_and_exits_in_paper_mode(tmp_path) -> N
         }
     )
     app = TradingOrchestrator(app_config)
-    app.entries_paused = False
+    assert not app.entries_paused
     now = datetime.now(timezone.utc)
     history_start = now - timedelta(minutes=5 * 20)
     for index in range(20):

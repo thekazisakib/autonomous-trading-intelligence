@@ -16,6 +16,7 @@ from approval.telegram_handler import TelegramAPIError, TelegramApprovalHandler
 from broker.base import BrokerAdapter, BrokerConfig
 from broker.registry import get_adapter
 from config.config_schema import AppConfig
+from config.loader import load_runtime_config
 from data.features import MarketFeatureEngine
 from data.quality_gate import QualityDecision, QualityGate
 from data.store import FeatureSnapshot, MarketTick, PositionState, Store
@@ -123,7 +124,7 @@ class TradingOrchestrator:
 
         # Quality gate (staleness, circuit filters, price sanity)
         self.quality_gate = QualityGate(config.quality_gate)
-        self.entries_paused = True
+        self.entries_paused = not config.trading.auto_execute
         self.pending_approvals: dict[str, PendingEntryApproval] = {}
         self._latest_ticks: dict[str, MarketTick] = {}
         self._latest_features: dict[str, FeatureSnapshot] = {}
@@ -317,6 +318,9 @@ class TradingOrchestrator:
                 + self.config.trading.paper_slippage_bps
             ),
             minimum_forecast_confidence=self.config.forecast.minimum_confidence,
+            minimum_data_coverage_pct=(
+                self.config.trading.minimum_universe_coverage_pct
+            ),
             live_ticks=self._latest_ticks,
             live_features=self._latest_features,
             max_tick_age_seconds=self.config.risk.data_stale_halt_seconds,
@@ -693,7 +697,7 @@ class TradingOrchestrator:
         )
         return (
             f"Mode: paper\nMarket data: {broker_status}\n"
-            f"Entries: {'paused' if self.entries_paused else 'approval required'}\n"
+            f"Entries: {'paused' if self.entries_paused else 'automatic paper execution'}\n"
             f"Gemini shadow analysis: {'enabled' if self.gemini_analyst else 'unavailable'}\n"
             f"Pending approvals: {len(self.pending_approvals)}\n"
             f"Paper cash: INR {account['cash']:.2f}\nPositions: {position_text}"
@@ -785,6 +789,7 @@ class TradingOrchestrator:
         )
         if not self._validate_tick(market_tick, datetime.now(timezone.utc)):
             return
+        self.store.upsert_live_tick(market_tick)
         feature, bar_closed = self.feature_engine.update(market_tick)
         if bar_closed and self.forecaster:
             candles = self.store.get_recent_candles(
@@ -960,9 +965,15 @@ class TradingOrchestrator:
 
 
 def main() -> None:
-    from config.loader import load_config
-
-    app = TradingOrchestrator(load_config())
+    config, universe_snapshot = load_runtime_config()
+    if universe_snapshot is not None:
+        logger.info(
+            "trading_universe_resolved",
+            source=universe_snapshot.source,
+            symbols=len(universe_snapshot.symbols),
+            fetched_at=universe_snapshot.fetched_at.isoformat(),
+        )
+    app = TradingOrchestrator(config)
     app.run()
 
 

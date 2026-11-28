@@ -9,14 +9,26 @@ import logging
 import os
 import struct
 import time
-from datetime import datetime, timezone
-from urllib.error import HTTPError, URLError
+from datetime import datetime, timedelta, timezone
+from math import isfinite
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from broker.base import BrokerConfig, BrokerAdapter, NormalizedTick
+from broker.base import BrokerAdapter, BrokerConfig, NormalizedTick
+from data.store import MarketCandle
 
 logger = logging.getLogger(__name__)
+INDIA_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
+HISTORICAL_INTERVALS = {
+    1: "ONE_MINUTE",
+    3: "THREE_MINUTE",
+    5: "FIVE_MINUTE",
+    10: "TEN_MINUTE",
+    15: "FIFTEEN_MINUTE",
+    30: "THIRTY_MINUTE",
+    60: "ONE_HOUR",
+}
 
 
 class AngelOneAdapter(BrokerAdapter):
@@ -237,6 +249,134 @@ class AngelOneAdapter(BrokerAdapter):
                 by_token[token] = symbol
         return by_symbol, by_token
 
+    def get_historical_candles(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        interval_minutes: int,
+    ) -> list[MarketCandle]:
+        interval = HISTORICAL_INTERVALS.get(interval_minutes)
+        if interval is None:
+            raise ValueError(
+                f"Unsupported Angel One candle interval: {interval_minutes} minutes"
+            )
+
+        start_local = _as_india_time(start)
+        end_local = _as_india_time(end)
+        if start_local >= end_local:
+            raise ValueError("Historical candle range start must be before end")
+        if end_local - start_local > timedelta(days=30):
+            raise ValueError("Angel One historical candle requests are limited to 30 days")
+
+        self.login()
+        if not self._jwt_token:
+            raise RuntimeError("Angel One login succeeded without an access token")
+
+        instrument_tokens, _ = self._load_instrument_tokens()
+        symbol_token = instrument_tokens.get(symbol.upper())
+        if symbol_token is None:
+            raise ValueError(f"No Angel One NSE equity token found for {symbol.upper()}")
+
+        api_key = os.getenv("ANGEL_API_KEY", self.config.api_key)
+        payload = json.dumps({
+            "exchange": "NSE",
+            "symboltoken": symbol_token,
+            "interval": interval,
+            "fromdate": start_local.strftime("%Y-%m-%d %H:%M"),
+            "todate": end_local.strftime("%Y-%m-%d %H:%M"),
+        }).encode("utf-8")
+        request = Request(
+            f"{self.config.base_url}/rest/secure/angelbroking/historical/v1/getCandleData",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self._jwt_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-ClientLocalIP": "127.0.0.1",
+                "X-ClientPublicIP": "127.0.0.1",
+                "X-MACAddress": "00:00:00:00:00:00",
+                "X-PrivateKey": api_key,
+                "X-UserType": "USER",
+                "X-SourceID": "WEB",
+            },
+            method="POST",
+        )
+
+        try:
+            with urlopen(request, timeout=20) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            raise RuntimeError(
+                f"Angel One historical candle request failed with HTTP {exc.code}"
+            ) from exc
+        except URLError as exc:
+            raise RuntimeError(
+                f"Angel One historical candle request failed: {exc.reason}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Angel One returned invalid historical candle JSON") from exc
+
+        if not isinstance(result, dict) or not result.get("status"):
+            message = result.get("message") if isinstance(result, dict) else None
+            raise RuntimeError(
+                f"Angel One rejected the historical candle request: "
+                f"{message or 'unspecified API error'}"
+            )
+        rows = result.get("data")
+        if rows is None:
+            return []
+        if not isinstance(rows, list):
+            raise RuntimeError("Angel One returned historical candles in an invalid format")
+
+        start_utc = start_local.astimezone(timezone.utc)
+        end_utc = end_local.astimezone(timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+        candles_by_time: dict[datetime, MarketCandle] = {}
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) < 6:
+                raise RuntimeError("Angel One returned a malformed historical candle")
+            try:
+                timestamp = _parse_historical_timestamp(row[0])
+                open_price, high, low, close = (
+                    float(row[index]) for index in range(1, 5)
+                )
+                volume = int(float(row[5]))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise RuntimeError(
+                    "Angel One returned invalid historical candle values"
+                ) from exc
+            if (
+                not all(isfinite(price) and price > 0 for price in (
+                    open_price, high, low, close
+                ))
+                or high < max(open_price, low, close)
+                or low > min(open_price, high, close)
+                or volume < 0
+            ):
+                raise RuntimeError("Angel One returned an invalid OHLCV candle")
+
+            if (
+                timestamp < start_utc
+                or timestamp > end_utc
+                or timestamp + timedelta(minutes=interval_minutes) > now_utc
+            ):
+                continue
+            candles_by_time[timestamp] = MarketCandle(
+                symbol=symbol.upper(),
+                timestamp=timestamp,
+                open=open_price,
+                high=high,
+                low=low,
+                close=close,
+                volume=volume,
+            )
+
+        return [
+            candles_by_time[timestamp]
+            for timestamp in sorted(candles_by_time)
+        ]
+
     def _symbols_to_tokens(self, symbols: list[str]) -> list[str]:
         missing = [symbol for symbol in symbols if symbol.upper() not in self._instrument_tokens]
         if missing:
@@ -333,3 +473,19 @@ class AngelOneAdapter(BrokerAdapter):
         """Fetch positions from Angel One."""
         logger.warning("get_positions_not_implemented")
         return []
+
+
+def _as_india_time(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=INDIA_TIMEZONE)
+    return value.astimezone(INDIA_TIMEZONE)
+
+
+def _parse_historical_timestamp(value: Any) -> datetime:
+    raw_timestamp = str(value)
+    if raw_timestamp.endswith("Z"):
+        raw_timestamp = raw_timestamp[:-1] + "+00:00"
+    timestamp = datetime.fromisoformat(raw_timestamp)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=INDIA_TIMEZONE)
+    return timestamp.astimezone(timezone.utc)
