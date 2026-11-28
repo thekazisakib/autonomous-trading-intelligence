@@ -24,6 +24,23 @@ def test_entry_when_rsi_oversold():
     assert signal.action == Action.BUY
 
 
+def test_no_entry_when_volume_surge_is_unavailable():
+    strat = DeterministicStrategy(entry_rsi=30.0)
+    feature = FeatureSnapshot(
+        symbol="RELIANCE",
+        timestamp=datetime.now(timezone.utc),
+        rsi_14=20.0,
+        volume_surge_pct=None,
+        ltp=2500.0,
+        data_freshness_seconds=0.0,
+    )
+
+    signal = strat.evaluate_entry("RELIANCE", feature, None, datetime.now(timezone.utc))
+
+    assert signal.action == Action.NO_TRADE
+    assert signal.reason == "no_entry_signal"
+
+
 def test_no_entry_when_position_open():
     strat = DeterministicStrategy(entry_rsi=30.0)
 
@@ -106,6 +123,44 @@ def test_risk_engine_approves_valid_proposal():
     assert result.decision == RiskDecision.APPROVED
 
 
+def test_risk_engine_caps_projected_position_size():
+    risk = RiskEngine(max_position_per_stock_pct=10.0, max_order_value_inr=100000.0)
+    proposal = TradeProposal(
+        symbol="RELIANCE",
+        action="BUY",
+        quantity=1,
+        price=6000.0,
+        order_value_inr=6000.0,
+        timestamp=datetime.now(timezone.utc),
+        current_position_value_inr=45000.0,
+        account_equity_inr=500000.0,
+    )
+
+    result = risk.check(proposal)
+
+    assert result.decision == RiskDecision.REJECTED
+    assert any("projected_position" in reason for reason in result.reasons)
+
+
+def test_risk_engine_allows_position_reducing_exit_after_entry_limits_trip():
+    risk = RiskEngine(max_order_value_inr=100.0, max_orders_per_day=1)
+    risk.orders_today_count = 1
+    risk.daily_realized_loss_pct = -2.0
+    risk.drawdown_from_peak_pct = -6.0
+    proposal = TradeProposal(
+        symbol="RELIANCE",
+        action="SELL",
+        quantity=100,
+        price=300.0,
+        order_value_inr=30000.0,
+        timestamp=datetime.now(timezone.utc),
+    )
+
+    result = risk.check(proposal)
+
+    assert result.decision == RiskDecision.APPROVED
+
+
 def test_store_upsert_and_retrieve():
     store = Store(":memory:")
     feature = FeatureSnapshot(
@@ -122,6 +177,7 @@ def test_store_upsert_and_retrieve():
     assert retrieved is not None
     assert retrieved.symbol == "RELIANCE"
     assert retrieved.rsi_14 == 25.0
+    store.close()
 
 
 def test_store_position_upsert_and_retrieve():
@@ -133,6 +189,7 @@ def test_store_position_upsert_and_retrieve():
     assert retrieved is not None
     assert retrieved.quantity == 10
     assert retrieved.avg_price == 2500.0
+    store.close()
 
 
 def test_config_audit_log_and_retrieve():
@@ -154,6 +211,7 @@ def test_config_audit_log_and_retrieve():
     assert history[0]["reason"] == "Increased daily loss tolerance"
     assert history[0]["changed_by"] == "user"
     assert history[0]["requires_restart"] == 1
+    store.close()
 
 
 def test_config_audit_requires_restart_defaults_true():
@@ -166,6 +224,7 @@ def test_config_audit_requires_restart_defaults_true():
 
     history = store.get_config_audit_history(limit=10)
     assert history[0]["requires_restart"] == 1
+    store.close()
 
 
 # --- Broker adapter tests ---

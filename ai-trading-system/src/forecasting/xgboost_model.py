@@ -105,7 +105,7 @@ class XGBoostForecaster:
         
         return {
             "direction": direction,
-            "confidence": round min(confidence, 1.0), 3),
+            "confidence": round(min(confidence, 1.0), 3),
             "magnitude": round(magnitude, 2),
             "model_version": "xgb_fallback" if not self.trained else "xgb_trained",
         }

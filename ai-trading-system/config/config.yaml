@@ -4,8 +4,11 @@ broker:
   provider: "angel"
   api_key_env: "ANGEL_API_KEY"
   api_secret_env: "ANGEL_PIN"
+  client_id_env: "ANGEL_CLIENT_ID"
+  totp_secret_env: "ANGEL_TOTP_SECRET"
   base_url: "https://apiconnect.angelone.in"
-  websocket_url: "wss://smartapisocket.angelone.in/websocket/v1"
+  websocket_url: "wss://smartapisocket.angelone.in/smart-stream"
+  instrument_master_url: "https://margincalculator.angelone.in/OpenAPI_File/files/OpenAPIScripMaster.json"
   rate_limit_per_second: 3
   daily_api_call_limit: 1000
 
@@ -29,8 +32,13 @@ trading:
   product_type: "MIS"
   order_type: "LIMIT"
   default_quantity: 1
+  market_data_enabled: true
+  analysis_interval_minutes: 5
   paper_trading: true
   auto_execute: false
+  paper_starting_capital_inr: 500000
+  paper_slippage_bps: 5
+  paper_cost_bps: 20
 
 strategy:
   type: "deterministic"
@@ -43,10 +51,19 @@ strategy:
   thesis_weight: 0.1
 
 rl:
-  enabled: True
-  model_path: "models/ppo_v1.pkl"
+  enabled: false
+  shadow_mode: false
+  model_type: "ppo"
+  model_path: "models/ppo_v1"
   policy_version: "ppo_v1"
   confidence_threshold: 0.7
+
+forecast:
+  enabled: true
+  model_type: "linear_trend_shadow"
+  horizon_bars: 3
+  lookback_bars: 20
+  minimum_confidence: 0.15
 
 research:
   enabled: True
@@ -70,11 +87,22 @@ observability:
   alert_telegram_bot_token_env: "TELEGRAM_BOT_TOKEN"
   alert_chat_id_env: "TELEGRAM_CHAT_ID"
 
+telegram_control:
+  enabled: true
+  bot_token_env: "TELEGRAM_BOT_TOKEN"
+  chat_id_env: "TELEGRAM_CHAT_ID"
+  allowed_user_id_env: "TELEGRAM_ALLOWED_USER_ID"
+  approval_timeout_seconds: 120
+  max_approval_price_change_pct: 0.25
+
 agentic:
   enabled: true
-  llm_provider: "local"
-  model_name: "microsoft/phi-3-mini-4k-instruct"
+  llm_provider: "gemini"
+  model_name: "gemini-3.5-flash-lite"
   model_path: "models/phi-3-mini"
+  api_key_env: "GEMINI_API_KEY_ROTATED"
+  analysis_interval_seconds: 900
+  request_timeout_seconds: 15
   max_tokens: 512
   temperature: 0.3
   thesis_weight: 0.2  # How much the thesis affects decisions

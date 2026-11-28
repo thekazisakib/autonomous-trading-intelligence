@@ -1,154 +1,191 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import json
-import time
-from typing import Optional, Callable, Awaitable
-
-import aiohttp
+import logging
+from collections.abc import Awaitable, Callable
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
+TelegramCommandHandler = Callable[[str], Awaitable[None]]
+
+
+class TelegramAPIError(RuntimeError):
+    pass
 
 
 class TelegramApprovalHandler:
-    """
-    Handles human approval via Telegram bot.
-    
-    When auto_execute is False, the orchestrator sends trade proposals
-    to this handler, which posts them to Telegram. The human operator
-    responds with /approve or /reject, and the handler returns the decision.
-    """
-    
-    def __init__(self, bot_token: str, chat_id: str, timeout_seconds: int = 300) -> None:
-        self.bot_token = bot_token
-        self.chat_id = chat_id
-        self.timeout_seconds = timeout_seconds
-        self._pending_decisions: dict[str, dict] = {}
-        self._http_session: Optional[aiohttp.ClientSession] = None
-    
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self._http_session is None or self._http_session.closed:
-            self._http_session = aiohttp.ClientSession()
-        return self._http_session
-    
-    async def send_approval(self, proposal: dict, symbol: str) -> Optional[str]:
-        """
-        Send a trade proposal to Telegram for approval.
-        
-        Args:
-            proposal: TradeProposal dict
-            symbol: Trading symbol
-            
-        Returns:
-            "approve" or "reject" string if received within timeout, None otherwise
-        """
-        message_text = self._format_approval_message(proposal, symbol)
-        message_id = await self._post_message(message_text)
-        
-        if message_id is None:
-            return None
-        
-        self._pending_decisions[message_id] = {
-            "symbol": symbol,
-            "proposal": proposal,
-            "timeout": time.time() + self.timeout_seconds,
-        }
-        
-        # Wait for decision
-        return await self._wait_for_decision(message_id)
-    
-    def _format_approval_message(self, proposal: dict, symbol: str) -> str:
-        """Format the trade proposal for Telegram display."""
-        side = proposal.get("action", "BUY")
-        qty = proposal.get("quantity", 1)
-        price = proposal.get("price", 0)
-        symbol = proposal.get("symbol", symbol)
-        order_value = proposal.get("order_value_inr", 0)
-        
-        emoji = "🟢" if side == "BUY" else "🔴"
-        
-        message = f"""{emoji} **Trade Approval**{emoji}
-        
-**Symbol:** {symbol}
-**Action:** {side}
-**Quantity:** {qty}
-**Price:** {price:.2f}
-**Order Value:** ₹{order_value:.2f}
-**Time:** {time.strftime('%H:%M:%S', time.gmtime())}
+    """Long-polling Telegram adapter restricted to one configured user and chat."""
 
-**Reply with:**
-• `/approve` - Execute trade
-• `/reject` - Cancel trade"""
-        
-        return message
-    
-    async def _post_message(self, text: str) -> Optional[str]:
-        """Post message to Telegram and return message_id."""
+    def __init__(
+        self,
+        bot_token: str,
+        chat_id: str,
+        allowed_user_id: str,
+        poll_timeout_seconds: int = 20,
+    ) -> None:
+        if not bot_token.strip() or not chat_id.strip() or not allowed_user_id.strip():
+            raise ValueError("Telegram token, chat ID, and allowed user ID are required")
         try:
-            session = await self._get_session()
-            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-            payload = {
-                "chat_id": self.chat_id,
-                "text": text,
-                "parse_mode": "Markdown"
-            }
-            
-            async with session.post(url, json=payload) as resp:
-                data = await resp.json()
-                if data.get("ok"):
-                    return data["result"]["message_id"]
-                else:
-                    logger.error(f"Telegram error: {data}")
-                    return None
-        except Exception:
-            logger.exception("Failed to post Telegram message")
-            return None
-    
-    async def _wait_for_decision(self, message_id: str) -> Optional[str]:
-        """Wait for approve/reject decision from human."""
-        deadline = self._pending_decisions[message_id]["timeout"]
-        
-        while time.time() < deadline:
-            # Check for new messages
+            int(chat_id)
+            int(allowed_user_id)
+        except ValueError as exc:
+            raise ValueError("Telegram chat and user IDs must be numeric") from exc
+        if not 0 < poll_timeout_seconds <= 50:
+            raise ValueError("Telegram poll timeout must be between 1 and 50 seconds")
+
+        self._bot_token = bot_token
+        self.chat_id = chat_id
+        self.allowed_user_id = allowed_user_id
+        self.poll_timeout_seconds = poll_timeout_seconds
+        self._offset: int | None = None
+        self._stopping = asyncio.Event()
+
+    async def send_message(self, text: str) -> None:
+        await self._api_call("sendMessage", {"chat_id": self.chat_id, "text": text})
+
+    async def send_approval(
+        self,
+        ticket: str,
+        proposal: dict[str, Any],
+        timeout_seconds: int,
+    ) -> None:
+        side = str(proposal.get("action", "BUY"))
+        message = (
+            "PAPER ENTRY APPROVAL REQUIRED\n"
+            f"Ticket: {ticket}\n"
+            f"Symbol: {proposal.get('symbol', 'unknown')}\n"
+            f"Action: {side}\n"
+            f"Quantity: {proposal.get('quantity', 0)}\n"
+            f"Reference price: {float(proposal.get('price', 0)):.2f}\n"
+            f"Order value: INR {float(proposal.get('order_value_inr', 0)):.2f}\n"
+            f"Expires in: {timeout_seconds} seconds\n\n"
+            f"Approve exactly this proposal: /approve {ticket}\n"
+            f"Reject it: /reject {ticket}"
+        )
+        await self.send_message(message)
+
+    async def poll(self, on_command: TelegramCommandHandler) -> None:
+        while not self._stopping.is_set():
+            if await self._discard_old_updates():
+                break
             try:
-                session = await self._get_session()
-                url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
-                payload = {
-                    "offset": None,
-                    "timeout": 10,
-                }
-                
-                async with session.post(url, json=payload) as resp:
-                    data = await resp.json()
-                    
-                    if data.get("ok"):
-                        for update in data.get("result", []):
-                            message_id_update = update["message"]["message_id"]
-                            text = update["message"]["text"]
-                            
-                            if message_id_update == message_id:
-                                if text == "/approve":
-                                    return "approve"
-                                elif text == "/reject":
-                                    return "reject"
-            except Exception:
-                logger.exception("Error checking Telegram updates")
-            
-            await asyncio.sleep(2)
-        
-        # Timeout
-        del self._pending_decisions[message_id]
-        return None
-    
-    async def close(self) -> None:
-        """Close the HTTP session."""
-        if self._http_session and not self._http_session.closed:
-            await self._http_session.close()
-            self._http_session = None
-    
-    def is_pending(self, message_id: str) -> bool:
-        """Check if a decision is still pending."""
-        if message_id not in self._pending_decisions:
+                await asyncio.wait_for(self._stopping.wait(), timeout=2)
+            except TimeoutError:
+                pass
+        while not self._stopping.is_set():
+            try:
+                updates = await self._api_call(
+                    "getUpdates",
+                    {
+                        "offset": self._offset,
+                        "timeout": self.poll_timeout_seconds,
+                        "allowed_updates": ["message"],
+                    },
+                    timeout_seconds=self.poll_timeout_seconds + 10,
+                )
+                for update in updates:
+                    self._offset = int(update["update_id"]) + 1
+                    message = update.get("message") or {}
+                    sender = message.get("from") or {}
+                    chat = message.get("chat") or {}
+                    if sender.get("is_bot"):
+                        continue
+                    if (
+                        str(sender.get("id")) != self.allowed_user_id
+                        or str(chat.get("id")) != self.chat_id
+                    ):
+                        logger.warning("telegram_command_unauthorized")
+                        continue
+                    text = message.get("text")
+                    if isinstance(text, str):
+                        try:
+                            await on_command(text)
+                        except Exception:
+                            logger.exception("telegram_command_handler_failed")
+                            try:
+                                await self.send_message(
+                                    "Command failed; check the application logs."
+                                )
+                            except TelegramAPIError as exc:
+                                logger.error(
+                                    "telegram_error_notice_failed",
+                                    error=str(exc),
+                                )
+            except asyncio.CancelledError:
+                raise
+            except TelegramAPIError as exc:
+                logger.error("telegram_poll_failed", error=str(exc))
+                try:
+                    await asyncio.wait_for(self._stopping.wait(), timeout=2)
+                except TimeoutError:
+                    pass
+
+    def stop(self) -> None:
+        self._stopping.set()
+
+    async def _discard_old_updates(self) -> bool:
+        try:
+            updates = await self._api_call(
+                "getUpdates",
+                {"offset": -1, "limit": 1, "timeout": 0, "allowed_updates": ["message"]},
+                timeout_seconds=10,
+            )
+            if updates:
+                self._offset = int(updates[-1]["update_id"]) + 1
+            return True
+        except TelegramAPIError as exc:
+            logger.error("telegram_initial_poll_failed", error=str(exc))
             return False
-        return time.time() < self._pending_decisions[message_id]["timeout"]
+
+    async def _api_call(
+        self,
+        method: str,
+        payload: dict[str, Any],
+        timeout_seconds: int = 15,
+    ) -> Any:
+        return await asyncio.to_thread(
+            self._api_call_sync,
+            method,
+            payload,
+            timeout_seconds,
+        )
+
+    def _api_call_sync(
+        self,
+        method: str,
+        payload: dict[str, Any],
+        timeout_seconds: int,
+    ) -> Any:
+        url = f"https://api.telegram.org/bot{self._bot_token}/{method}"
+        request = Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=timeout_seconds) as response:
+                result = json.loads(response.read())
+        except HTTPError as exc:
+            raise TelegramAPIError(
+                f"Telegram {method} returned HTTP {exc.code}"
+            ) from None
+        except (URLError, TimeoutError, OSError) as exc:
+            raise TelegramAPIError(
+                f"Telegram {method} request failed: {type(exc).__name__}"
+            ) from None
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise TelegramAPIError(
+                f"Telegram {method} returned invalid JSON: {type(exc).__name__}"
+            ) from None
+
+        if not isinstance(result, dict) or not result.get("ok"):
+            error_code = result.get("error_code") if isinstance(result, dict) else None
+            raise TelegramAPIError(
+                f"Telegram {method} was rejected"
+                + (f" with error code {error_code}" if error_code else "")
+            )
+        return result.get("result")

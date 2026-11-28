@@ -7,10 +7,15 @@ Requires-Dist: pydantic>=2.5.0
 Requires-Dist: PyYAML>=6.0.1
 Requires-Dist: python-dotenv>=1.0.0
 Requires-Dist: structlog>=24.1.0
-Requires-Dist: websockets>=12.0
+Requires-Dist: websockets>=14.0
 Requires-Dist: websocket-client>=1.8.0
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0.0; extra == "dev"
 Requires-Dist: pytest-cov>=4.1.0; extra == "dev"
 Requires-Dist: ruff>=0.6.0; extra == "dev"
 Requires-Dist: mypy>=1.10.0; extra == "dev"
+Provides-Extra: rl
+Requires-Dist: gymnasium>=1.0.0; extra == "rl"
+Requires-Dist: stable-baselines3>=2.4.0; extra == "rl"
+Provides-Extra: dashboard
+Requires-Dist: streamlit>=1.37.0; extra == "dashboard"

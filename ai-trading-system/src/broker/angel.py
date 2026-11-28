@@ -4,18 +4,17 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import json
+import logging
 import os
 import struct
 import time
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from urllib.error import HTTPError, URLError
+from typing import Any
+from urllib.request import Request, urlopen
 
 from broker.base import BrokerConfig, BrokerAdapter, NormalizedTick
-import json
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +34,9 @@ class AngelOneAdapter(BrokerAdapter):
         self._subscribed_symbols: set[str] = set()
         self._jwt_token: str | None = None
         self._feed_token: str | None = None
+        self._instrument_tokens: dict[str, str] = {}
+        self._symbols_by_token: dict[str, str] = {}
+        self._receive_task: asyncio.Task[None] | None = None
 
     @staticmethod
     def _generate_totp(secret: str, time_offset_seconds: int = 0) -> str:
@@ -49,11 +51,11 @@ class AngelOneAdapter(BrokerAdapter):
 
     def login(self, totp_time_offset_seconds: int | None = None) -> dict[str, Any]:
         if totp_time_offset_seconds is None:
-            totp_time_offset_seconds = int(os.getenv("ANGEL_TOTP_TIME_OFFSET_SECONDS", "-30"))
+            totp_time_offset_seconds = int(os.getenv("ANGEL_TOTP_TIME_OFFSET_SECONDS", "0"))
         api_key = os.getenv("ANGEL_API_KEY", self.config.api_key)
-        client_id = os.getenv("ANGEL_CLIENT_ID", "")
+        client_id = os.getenv("ANGEL_CLIENT_ID", self.config.client_id)
         pin = os.getenv("ANGEL_PIN", self.config.api_secret)
-        totp_secret = os.getenv("ANGEL_TOTP_SECRET", "")
+        totp_secret = os.getenv("ANGEL_TOTP_SECRET", self.config.totp_secret)
 
         missing = [
             name for name, value in (
@@ -107,10 +109,23 @@ class AngelOneAdapter(BrokerAdapter):
         try:
             import websockets  # type: ignore
 
-            logger.info("connecting_to_angel_one", url=self.config.websocket_url)
-            self._ws = await websockets.connect(self.config.websocket_url)
+            session = await asyncio.to_thread(self.login)
+            headers = {
+                "Authorization": f"Bearer {session['jwtToken']}",
+                "x-api-key": os.getenv("ANGEL_API_KEY", self.config.api_key),
+                "x-client-code": os.getenv("ANGEL_CLIENT_ID", self.config.client_id),
+                "x-feed-token": session["feedToken"],
+            }
+            logger.info("connecting_to_angel_one", extra={"url": self.config.websocket_url})
+            self._ws = await websockets.connect(
+                self.config.websocket_url,
+                additional_headers=headers,
+                ping_interval=20,
+                ping_timeout=20,
+            )
             self._connected = True
             self._reconnect_delay = 1.0
+            self._receive_task = asyncio.create_task(self._receive_loop())
             logger.info("angel_one_connected")
         except Exception:
             logger.exception("angel_one_connect_failed")
@@ -119,9 +134,17 @@ class AngelOneAdapter(BrokerAdapter):
 
     async def disconnect(self) -> None:
         """Close WebSocket connection."""
+        self._connected = False
+        if self._receive_task and self._receive_task is not asyncio.current_task():
+            self._receive_task.cancel()
+            try:
+                await self._receive_task
+            except asyncio.CancelledError:
+                pass
+            self._receive_task = None
         if self._ws:
             await self._ws.close()
-        self._connected = False
+            self._ws = None
         logger.info("angel_one_disconnected")
 
     async def subscribe(self, symbols: list[str]) -> None:
@@ -129,16 +152,22 @@ class AngelOneAdapter(BrokerAdapter):
         if not self._connected:
             await self.connect()
 
-        self._subscribed_symbols.update(symbols)
-        logger.info("subscribing", symbols=list(self._subscribed_symbols))
+        if not self._instrument_tokens:
+            self._instrument_tokens, self._symbols_by_token = await asyncio.to_thread(
+                self._load_instrument_tokens
+            )
 
-        # Angel One subscription message format
+        tokens = self._symbols_to_tokens(symbols)
+        self._subscribed_symbols.update(symbols)
+        logger.info("subscribing", extra={"symbols": list(self._subscribed_symbols)})
+
         sub_msg = {
-            "action": "subscribe",
+            "correlationID": "ati-market",
+            "action": 1,
             "params": {
-                "mode": "LTP",
+                "mode": 3,
                 "tokenList": [
-                    {"exchange": "NSE", "tokens": self._symbols_to_tokens(symbols)}
+                    {"exchangeType": 1, "tokens": tokens}
                 ],
             },
         }
@@ -148,66 +177,129 @@ class AngelOneAdapter(BrokerAdapter):
 
     async def unsubscribe(self, symbols: list[str]) -> None:
         """Unsubscribe from Angel One feed."""
+        tokens = self._symbols_to_tokens(symbols)
         self._subscribed_symbols.difference_update(symbols)
-        logger.info("unsubscribing", symbols=symbols)
+        if self._ws and self._connected:
+            await self._ws.send(json.dumps({
+                "correlationID": "ati-market",
+                "action": 0,
+                "params": {
+                    "mode": 3,
+                    "tokenList": [{"exchangeType": 1, "tokens": tokens}],
+                },
+            }))
+        logger.info("unsubscribing", extra={"symbols": symbols})
 
     async def _receive_loop(self) -> None:
         """Receive ticks from Angel One WebSocket."""
         while self._connected and self._ws:
             try:
                 raw = await self._ws.recv()
-                data = json.loads(raw)
-                tick = self._parse_tick(data)
+                if isinstance(raw, str):
+                    logger.info("angel_websocket_message", extra={"message": raw})
+                    continue
+                tick = self._parse_tick(raw)
                 if tick:
-                    self._emit_tick(tick)
+                    await self._emit_tick_async(tick)
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("tick_receive_error")
-                await asyncio.sleep(1)
-                await self._reconnect()
+                self._connected = False
+                break
 
-    async def _reconnect(self) -> None:
-        """Reconnect with exponential backoff."""
-        self._connected = False
-        delay = self._reconnect_delay
-        logger.info("reconnecting", delay=delay)
-        await asyncio.sleep(delay)
-        self._reconnect_delay = min(self._reconnect_delay * 2, self._max_reconnect_delay)
+    def _load_instrument_tokens(self) -> tuple[dict[str, str], dict[str, str]]:
+        if not self.config.instrument_master_url:
+            raise RuntimeError("Angel One instrument master URL is not configured")
 
+        request = Request(
+            self.config.instrument_master_url,
+            headers={"User-Agent": "autonomous-trading-intelligence/1.0"},
+        )
         try:
-            await self.connect()
-            if self._subscribed_symbols:
-                await self.subscribe(list(self._subscribed_symbols))
-        except Exception:
-            logger.exception("reconnect_failed")
+            with urlopen(request, timeout=30) as response:
+                instruments = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError) as exc:
+            raise RuntimeError(f"Unable to load Angel One instrument master: {exc}") from exc
+
+        by_symbol: dict[str, str] = {}
+        by_token: dict[str, str] = {}
+        for instrument in instruments:
+            if instrument.get("exch_seg") != "NSE":
+                continue
+            trading_symbol = str(instrument.get("symbol", ""))
+            if not trading_symbol.endswith("-EQ"):
+                continue
+            symbol = trading_symbol[:-3].upper()
+            token = str(instrument.get("token", ""))
+            if symbol and token:
+                by_symbol[symbol] = token
+                by_token[token] = symbol
+        return by_symbol, by_token
 
     def _symbols_to_tokens(self, symbols: list[str]) -> list[str]:
-        """Map symbol names to Angel One token IDs.
-        
-        In production, maintain a symbol-to-token mapping table.
-        For now, return symbol names as placeholder tokens.
-        """
-        # Token mapping should be loaded from Angel One master contract
-        return symbols
+        missing = [symbol for symbol in symbols if symbol.upper() not in self._instrument_tokens]
+        if missing:
+            raise ValueError(f"No Angel One NSE equity token found for: {', '.join(missing)}")
+        return [self._instrument_tokens[symbol.upper()] for symbol in symbols]
 
-    def _parse_tick(self, data: dict[str, Any]) -> NormalizedTick | None:
+    def _parse_tick(self, data: bytes | bytearray | dict[str, Any]) -> NormalizedTick | None:
         """Parse Angel One WebSocket message into NormalizedTick."""
         try:
-            symbol = data.get("symbol", data.get("tradingSymbol", ""))
-            ltp = float(data.get("ltp", data.get("lastTradedPrice", 0)))
+            if isinstance(data, dict):
+                symbol = data.get("symbol", data.get("tradingSymbol", ""))
+                ltp = float(data.get("ltp", data.get("lastTradedPrice", 0)))
+                if not symbol or ltp <= 0:
+                    return None
+                return NormalizedTick(
+                    symbol=symbol,
+                    timestamp=datetime.now(timezone.utc),
+                    ltp=ltp,
+                    bid=float(data["bid"]) if data.get("bid") else None,
+                    ask=float(data["ask"]) if data.get("ask") else None,
+                    volume=int(data.get("volume", 0)),
+                )
+
+            if len(data) < 51:
+                raise ValueError(f"Angel One quote packet is too short: {len(data)} bytes")
+            mode = data[0]
+            token = data[2:27].split(b"\0", 1)[0].decode("ascii")
+            symbol = self._symbols_by_token.get(token)
+            ltp = struct.unpack_from("<q", data, 43)[0] / 100.0
+            timestamp_ms = struct.unpack_from("<q", data, 35)[0]
+            timestamp = (
+                datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+                if timestamp_ms > 0 else datetime.now(timezone.utc)
+            )
+            volume = 0
+            bid = None
+            ask = None
+            if mode in (2, 3) and len(data) >= 75:
+                volume = int(struct.unpack_from("<q", data, 67)[0])
+            if mode == 3 and len(data) >= 167:
+                for index in range(5):
+                    offset = 147 + index * 20
+                    side = struct.unpack_from("<H", data, offset)[0]
+                    level_price = struct.unpack_from("<q", data, offset + 10)[0] / 100.0
+                    if level_price <= 0:
+                        continue
+                    if side == 0 and bid is None:
+                        bid = level_price
+                    elif side != 0 and ask is None:
+                        ask = level_price
 
             if not symbol or ltp <= 0:
                 return None
-
             return NormalizedTick(
                 symbol=symbol,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=timestamp,
                 ltp=ltp,
-                bid=float(data.get("bid", 0)) if data.get("bid") else None,
-                ask=float(data.get("ask", 0)) if data.get("ask") else None,
-                volume=int(data.get("volume", 0)),
+                bid=bid,
+                ask=ask,
+                volume=volume,
             )
-        except Exception:
-            logger.exception("tick_parse_failed raw=%s", data)
+        except (ValueError, UnicodeDecodeError, struct.error):
+            logger.exception("tick_parse_failed")
             return None
 
     async def place_order(

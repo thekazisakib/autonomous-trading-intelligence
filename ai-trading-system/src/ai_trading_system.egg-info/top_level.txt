@@ -1,12 +1,16 @@
 __init__
+agentic
 approval
 audit
 broker
 data
 execution
+forecasting
 main
 orchestrator
+realtime
 reconciliation
 research
 risk
+rl
 strategy

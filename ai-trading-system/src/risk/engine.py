@@ -19,6 +19,8 @@ class TradeProposal:
     price: float
     order_value_inr: float
     timestamp: datetime
+    current_position_value_inr: float = 0.0
+    account_equity_inr: float = 0.0
 
 
 @dataclass
@@ -57,33 +59,38 @@ class RiskEngine:
 
     def check(self, proposal: TradeProposal) -> RiskResult:
         reasons: list[str] = []
+        is_entry = proposal.action.upper() == "BUY"
 
         # Fat-finger
-        if proposal.order_value_inr > self.max_order_value_inr:
+        if is_entry and proposal.order_value_inr > self.max_order_value_inr:
             reasons.append(
                 f"order_value {proposal.order_value_inr:.0f} > limit {self.max_order_value_inr:.0f}"
             )
 
-        # Daily order count
-        if self.orders_today_count >= self.max_orders_per_day:
+        # Entry limits must not prevent a position-reducing exit.
+        if is_entry and self.orders_today_count >= self.max_orders_per_day:
             reasons.append(f"daily order limit {self.max_orders_per_day} reached")
 
-        # Daily loss circuit
-        if self.daily_realized_loss_pct <= -self.max_daily_loss_pct:
+        if is_entry and self.daily_realized_loss_pct <= -self.max_daily_loss_pct:
             reasons.append(
                 f"daily_loss {self.daily_realized_loss_pct:.2f}% breached limit {-self.max_daily_loss_pct:.2f}%"
             )
 
-        # Drawdown circuit
-        if self.drawdown_from_peak_pct <= -self.max_drawdown_pct:
+        if is_entry and self.drawdown_from_peak_pct <= -self.max_drawdown_pct:
             reasons.append(
                 f"drawdown {self.drawdown_from_peak_pct:.2f}% breached limit {-self.max_drawdown_pct:.2f}%"
             )
 
-        # Position concentration
-        if self.current_position_pct >= self.max_position_per_stock_pct:
+        if is_entry and proposal.account_equity_inr > 0:
+            projected_position_pct = (
+                proposal.current_position_value_inr + proposal.order_value_inr
+            ) / proposal.account_equity_inr * 100
+        else:
+            projected_position_pct = self.current_position_pct
+
+        if is_entry and projected_position_pct > self.max_position_per_stock_pct:
             reasons.append(
-                f"position {self.current_position_pct:.1f}% >= limit {self.max_position_per_stock_pct:.1f}%"
+                f"projected_position {projected_position_pct:.1f}% > limit {self.max_position_per_stock_pct:.1f}%"
             )
 
         # Data quality

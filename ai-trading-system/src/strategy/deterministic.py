@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 
+from data.store import FeatureSnapshot, PositionState
+
 
 class Action(str, Enum):
     BUY = "BUY"
@@ -53,8 +55,6 @@ class DeterministicStrategy:
     ) -> StrategySignal:
         """Return BUY if all conditions met, else NO_TRADE."""
 
-        from data.store import FeatureSnapshot, PositionState  # noqa: F841
-
         # Data freshness check
         if feature.data_freshness_seconds > 30:
             return StrategySignal(
@@ -74,8 +74,8 @@ class DeterministicStrategy:
 
         # RSI oversold + volume surge
         volume_ok = (
-            feature.volume_surge_pct is None
-            or feature.volume_surge_pct > self.min_volume_surge_pct
+            feature.volume_surge_pct is not None
+            and feature.volume_surge_pct > self.min_volume_surge_pct
         )
         if feature.rsi_14 < self.entry_rsi and volume_ok:
             return StrategySignal(

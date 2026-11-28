@@ -15,6 +15,9 @@ class BrokerConfig:
     websocket_url: str
     rate_limit_per_second: int = 3
     daily_api_call_limit: int = 1000
+    client_id: str = ""
+    totp_secret: str = ""
+    instrument_master_url: str = ""
 
 
 @dataclass
@@ -94,6 +97,16 @@ class BrokerAdapter(ABC):
         self._last_tick_time[tick.symbol] = datetime.now(timezone.utc)
         if self._on_tick_callback:
             self._on_tick_callback(tick)
+
+    async def _emit_tick_async(self, tick: NormalizedTick) -> None:
+        """Emit a tick and await asynchronous consumers when necessary."""
+        import inspect
+
+        self._last_tick_time[tick.symbol] = datetime.now(timezone.utc)
+        if self._on_tick_callback:
+            result = self._on_tick_callback(tick)
+            if inspect.isawaitable(result):
+                await result
 
     def get_data_freshness(self, symbol: str) -> float | None:
         """Return seconds since last tick for symbol, or None if never received."""

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 
 from config.config_schema import AppConfig
 
@@ -29,6 +30,7 @@ def _interpolate(value: Any) -> Any:
 
 def load_config(config_path: str | Path = "config/config.yaml") -> AppConfig:
     """Load YAML config, interpolate environment variables, and validate."""
+    load_dotenv()
     path = Path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path.resolve()}")

@@ -8,7 +8,7 @@ dependencies = [
     "PyYAML>=6.0.1",
     "python-dotenv>=1.0.0",
     "structlog>=24.1.0",
-    "websockets>=12.0",
+    "websockets>=14.0",
     "websocket-client>=1.8.0",
 ]
 
@@ -19,6 +19,13 @@ dev = [
     "ruff>=0.6.0",
     "mypy>=1.10.0",
 ]
+rl = [
+    "gymnasium>=1.0.0",
+    "stable-baselines3>=2.4.0",
+]
+dashboard = [
+    "streamlit>=1.37.0",
+]
 
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
@@ -26,6 +33,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 addopts = "--cov=src --cov=config --cov-report=term-missing --cov-fail-under=80"
 
 [tool.ruff]
